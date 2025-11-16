@@ -37,7 +37,12 @@ function getEmailModule() {
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Root route
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Load data dari Excel
 let booksData = [];
@@ -281,6 +286,15 @@ app.get('/api/customers/export', async (req, res) => {
     console.error('Error exporting customers:', error);
     res.status(500).send('Error exporting customers');
   }
+});
+
+// Catch-all route for SPA
+app.get('*', (req, res) => {
+  // Don't catch API routes
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Start server
