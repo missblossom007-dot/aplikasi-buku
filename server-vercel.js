@@ -1,14 +1,38 @@
 const express = require('express');
 const XLSX = require('xlsx');
 const path = require('path');
-const { connectDB, Order, Customer, Request } = require('./db');
-const { initializeEmailTransporter, sendOrderEmail } = require('./email-config');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize email
-initializeEmailTransporter();
+// Lazy load modules to avoid initialization errors
+let db = null;
+let emailModule = null;
+
+async function getDB() {
+  if (!db) {
+    db = require('./db');
+    await db.connectDB();
+  }
+  return db;
+}
+
+function getEmailModule() {
+  if (!emailModule) {
+    try {
+      // Try Vercel email config first (uses env vars)
+      emailModule = require('./email-config-vercel');
+      emailModule.initializeEmailTransporter();
+    } catch (error) {
+      console.log('⚠️ Email module not available:', error.message);
+      emailModule = {
+        sendOrderEmail: async () => ({ success: false, message: 'Email not configured' })
+      };
+    }
+  }
+  return emailModule;
+}
 
 // Middleware
 app.use(express.json());
@@ -20,7 +44,14 @@ let booksData = [];
 
 function loadBooksData() {
   try {
-    const workbook = XLSX.readFile('REKAP BUKU.xlsx');
+    // Check if file exists
+    const excelPath = path.join(__dirname, 'REKAP BUKU.xlsx');
+    if (!fs.existsSync(excelPath)) {
+      console.error('❌ REKAP BUKU.xlsx not found');
+      return;
+    }
+    
+    const workbook = XLSX.readFile(excelPath);
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     const rawData = XLSX.utils.sheet_to_json(worksheet);
@@ -39,14 +70,14 @@ function loadBooksData() {
     
     console.log(`✅ Loaded ${booksData.length} books`);
   } catch (error) {
-    console.error('Error loading books:', error);
+    console.error('❌ Error loading books:', error.message);
+    // Set empty array if loading fails
+    booksData = [];
   }
 }
 
+// Load books on startup
 loadBooksData();
-
-// Connect to MongoDB
-connectDB();
 
 // API Routes
 app.get('/api/books', (req, res) => {
@@ -96,6 +127,7 @@ app.get('/api/categories', (req, res) => {
 app.post('/api/request', async (req, res) => {
   try {
     const { name, email, bookTitle, message } = req.body;
+    const { Request } = await getDB();
     
     const request = new Request({
       name,
@@ -114,9 +146,11 @@ app.post('/api/request', async (req, res) => {
 
 app.get('/api/requests', async (req, res) => {
   try {
+    const { Request } = await getDB();
     const requests = await Request.find().sort({ date: -1 });
     res.json(requests);
   } catch (error) {
+    console.error('Error loading requests:', error);
     res.json([]);
   }
 });
@@ -125,6 +159,8 @@ app.get('/api/requests', async (req, res) => {
 app.post('/api/order', async (req, res) => {
   try {
     const { name, email, phone, address, books, total, bookCount } = req.body;
+    const { Order } = await getDB();
+    const emailModule = getEmailModule();
     
     const booksWithLinks = books.map(cartBook => {
       if (!cartBook.driveLink) {
@@ -154,8 +190,8 @@ app.post('/api/order', async (req, res) => {
     // Save/update customer
     await saveCustomerData(name, email, phone, bookCount, total);
     
-    // Send email
-    sendOrderEmail(email, name, booksWithLinks, total)
+    // Send email (non-blocking)
+    emailModule.sendOrderEmail(email, name, booksWithLinks, total)
       .then(result => {
         if (result.success) {
           console.log(`📧 Email sent to ${email}`);
@@ -170,15 +206,17 @@ app.post('/api/order', async (req, res) => {
     });
   } catch (error) {
     console.error('Error saving order:', error);
-    res.status(500).json({ success: false, message: 'Error saving order' });
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
 app.get('/api/orders', async (req, res) => {
   try {
+    const { Order } = await getDB();
     const orders = await Order.find().sort({ date: -1 });
     res.json(orders);
   } catch (error) {
+    console.error('Error loading orders:', error);
     res.json([]);
   }
 });
@@ -186,6 +224,7 @@ app.get('/api/orders', async (req, res) => {
 // Customer functions
 async function saveCustomerData(name, email, phone, bookCount, total) {
   try {
+    const { Customer } = await getDB();
     const existingCustomer = await Customer.findOne({ email });
     
     if (existingCustomer) {
@@ -216,15 +255,18 @@ async function saveCustomerData(name, email, phone, bookCount, total) {
 
 app.get('/api/customers', async (req, res) => {
   try {
+    const { Customer } = await getDB();
     const customers = await Customer.find().sort({ totalSpent: -1 });
     res.json(customers);
   } catch (error) {
+    console.error('Error loading customers:', error);
     res.json([]);
   }
 });
 
 app.get('/api/customers/export', async (req, res) => {
   try {
+    const { Customer } = await getDB();
     const customers = await Customer.find();
     
     let csv = 'Nama,Email,WhatsApp,Total Pesanan,Total Buku,Total Belanja,Pertama Beli,Terakhir Beli\n';
@@ -236,6 +278,7 @@ app.get('/api/customers/export', async (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename=customers.csv');
     res.send(csv);
   } catch (error) {
+    console.error('Error exporting customers:', error);
     res.status(500).send('Error exporting customers');
   }
 });
